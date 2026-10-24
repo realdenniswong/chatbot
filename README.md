@@ -13,8 +13,6 @@
 3. 選擇 API 格式、填寫完整 API 網址、模型名稱及 API key。
 4. 套用設定後開始聊天。
 
-本頁目前預設接駁天域：`https://tianyuai.lol/v1/chat/completions`、Chat Completions 格式、模型 `gpt-5.6-luna`。使用者已確認此模型搭配 `default` 群組能在 Playground 使用。應用需要填入屬於 `default` 群組、允許此模型的 API key；在 Playground 選群組不會更改現有令牌設定。
-
 之前保存的天域 `gpt-5.5` 或 `gpt-5.6-sol-openai-compact` 設定會更新至 `gpt-5.6-luna`，其他連線資料保持優先。模型名稱不會自動授予 API key 存取權。
 
 支援三種格式：
