@@ -42,6 +42,8 @@ const path = require('node:path');
     await page.locator('[name="protocol"]').selectOption('responses');
     await page.locator('[name="endpoint"]').fill('https://chat.example.test/default');
     await page.locator('[name="model"]').fill('my-personal-model');
+    assert.equal(await page.locator('[name="rememberKey"]').isChecked(), true);
+    await page.locator('[name="rememberKey"]').uncheck();
     await page.locator('[name="apiKey"]').fill('private-memory-key');
     await page.getByRole('button', { name: '套用設定' }).click();
     assert.ok(!(await page.evaluate(() => JSON.stringify(Object.entries(localStorage)))).includes('private-memory-key'));
@@ -57,7 +59,7 @@ const path = require('node:path');
     assert.equal(await messages().count(), 2, 'saved conversation restores after reload');
 
     for (let i = 0; i < 5; i++) await send('任意訊息 ' + i);
-    assert.equal(serviceRequests[1].authorization, undefined, 'API key does not survive reload');
+    assert.equal(serviceRequests[1].authorization, undefined, 'opting out of remembering the key clears it on reload');
     assert.equal((await records())[0].messages.length, 12, 'full transcript survives beyond eight messages');
     await page.reload();
     assert.equal(await messages().count(), 12);

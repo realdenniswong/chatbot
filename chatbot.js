@@ -265,10 +265,11 @@
     const root = typeof target === 'string' ? document.querySelector(target) : target;
     if (!root) throw new Error('找不到 chatbot 容器。');
     if (root.chatbotInstance) return root.chatbotInstance;
-    const config = { storageKey: 'chatbot-app:' + location.pathname, saveByDefault: true, endpoint: '', model: '', apiKey: '', protocol: 'responses', stream: true, ...options.connectionDefaults, ...options };
+    const config = { storageKey: 'chatbot-app:' + location.pathname, saveByDefault: true, endpoint: '', model: '', apiKey: '', rememberKey: true, protocol: 'responses', stream: true, ...options.connectionDefaults, ...options };
     const prefix = config.storageKey + ':conversation:';
     const metaKey = config.storageKey + ':preferences';
     const connectionKey = config.storageKey + ':connection';
+    const credentialKey = config.storageKey + ':api-key';
     const instanceId = 'dc-' + uid();
     const abortEvents = new AbortController();
     let requestController = null;
@@ -334,9 +335,11 @@
           <label>API 網址<input name="endpoint" type="url" placeholder="https://api.openai.com/v1/responses" required spellcheck="false"></label>
           <label>模型名稱<input name="model" type="text" placeholder="輸入你帳戶可用的模型 ID" spellcheck="false"></label>
           <label class="dc-stream-setting"><input name="stream" type="checkbox"><span>逐步顯示回覆<small>邊生成邊顯示，需模型服務支援。</small></span></label>
-          <label>API key <span class="dc-optional">只留在目前分頁</span><input name="apiKey" type="password" autocomplete="off" placeholder="服務不需要 key 時可留空" spellcheck="false" data-lpignore="true"></label>
+          <label>API key<input name="apiKey" type="password" autocomplete="off" placeholder="服務不需要 key 時可留空" spellcheck="false" data-lpignore="true"></label>
+          <label class="dc-stream-setting"><input name="rememberKey" type="checkbox"><span>記住 API key<small>只存喺此瀏覽器，重新整理後繼續使用。</small></span></label>
+          <div class="dc-key-actions"><span data-ref="key-status" role="status"></span><button type="button" data-action="forget-key">清除 key</button></div>
           <p class="dc-settings-note" data-ref="provider-note"></p>
-          <p class="dc-settings-note">Key 只會傳送至你設定的 API 網址，重新整理後需要再輸入。服務必須允許瀏覽器連線；聊天儲存開關只控制此裝置的記錄。</p>
+          <p class="dc-settings-note">Key 只會傳送至你設定的 API 網址。取消「記住 API key」並套用後，只保留喺目前分頁。服務必須允許瀏覽器連線；聊天儲存開關只控制對話記錄。</p>
           <p class="dc-settings-error" data-ref="settings-error" role="alert"></p>
           <div class="dc-settings-actions"><button type="button" data-action="close-settings">取消</button><button type="submit">套用設定</button></div>
         </form>
@@ -362,6 +365,31 @@
     function read(key) {
       try { return JSON.parse(storage?.getItem(key) || 'null'); }
       catch (_) { return null; }
+    }
+    function updateKeyStatus() {
+      const saved = read(credentialKey);
+      ref('key-status').textContent = !storage ? '瀏覽器未能儲存，只限目前分頁。'
+        : saved?.endpoint === config.endpoint && typeof saved?.apiKey === 'string' && saved.apiKey ? '已記住此連線的 API key' : '尚未記住 API key';
+      root.querySelector('[data-action="forget-key"]').disabled = !config.apiKey && !ref('settings-form').elements.apiKey.value && !saved?.apiKey;
+    }
+    function removeSavedKey() {
+      if (!storage) return true;
+      try {
+        storage.removeItem(credentialKey);
+        if (storage.getItem(credentialKey) !== null) throw new Error('remove_failed');
+        return true;
+      } catch (_) {
+        ref('settings-error').textContent = '未能清除已記住的 API key。請檢查瀏覽器儲存權限後再試。';
+        return false;
+      }
+    }
+    function clearKey() {
+      if (!removeSavedKey()) return;
+      config.apiKey = '';
+      ref('settings-form').elements.apiKey.value = '';
+      ref('settings-error').textContent = '';
+      updateKeyStatus();
+      notice(storage ? '已清除此瀏覽器記住的 API key。' : '已清除目前分頁的 API key；瀏覽器儲存空間暫時無法存取。');
     }
     function write(key, value) {
       try { storage.setItem(key, JSON.stringify(value)); return true; }
@@ -595,8 +623,11 @@
       form.elements.stream.checked = config.stream;
       form.elements.stream.disabled = config.protocol === 'custom';
       form.elements.apiKey.value = config.apiKey;
+      form.elements.rememberKey.checked = Boolean(storage) && config.rememberKey;
+      form.elements.rememberKey.disabled = !storage;
       ref('settings-error').textContent = '';
       updateProviderNote();
+      updateKeyStatus();
       ref('settings').showModal();
     }
     function updateProviderNote() {
@@ -691,7 +722,7 @@
       if (typeof config.reply !== 'function' && (!config.endpoint || (config.protocol !== 'custom' && !config.model) || (needsKey && !config.apiKey))) {
         input.value = message;
         showSettings();
-        notice(needsKey && !config.apiKey ? '請先輸入 API key；重新整理後需要再次輸入。' : '先設定 AI 連線，就可以開始聊天。');
+        notice(needsKey && !config.apiKey ? '請先喺設定輸入 API key。' : '先設定 AI 連線，就可以開始聊天。');
         return false;
       }
       const controller = new AbortController();
@@ -818,6 +849,7 @@
       if (action === 'attach') ref('image-input').click();
       if (action === 'remove-image') clearImage();
       if (action === 'stop') requestController?.abort('user');
+      if (action === 'forget-key') clearKey();
       if (button.dataset.question) send(button.dataset.question);
     });
     listen(ref('save'), 'change', () => setSaving(ref('save').checked));
@@ -860,16 +892,26 @@
         fields.model.focus();
         return;
       }
+      const apiKey = fields.apiKey.value.trim();
+      const rememberKey = fields.rememberKey.checked && Boolean(storage);
+      if ((!rememberKey || !apiKey) && !removeSavedKey()) return;
       config.endpoint = endpoint.href;
       config.model = model;
       config.protocol = protocol;
       config.stream = fields.stream.checked;
-      config.apiKey = fields.apiKey.value.trim();
-      // Persist only non-secret connection details; the API key remains in memory.
-      const remembered = !storage || write(connectionKey, { endpoint: config.endpoint, model, protocol, stream: config.stream });
+      config.apiKey = apiKey;
+      config.rememberKey = rememberKey;
+      let keySaved = true;
+      if (rememberKey && apiKey) {
+        try { storage.setItem(credentialKey, JSON.stringify({ endpoint: config.endpoint, apiKey })); }
+        catch (_) { keySaved = false; }
+      }
+      // Credentials are separate from conversation records and are bound to this endpoint.
+      const remembered = !storage || write(connectionKey, { endpoint: config.endpoint, model, protocol, stream: config.stream, rememberKey });
       updateMode();
       ref('settings').close();
-      if (remembered) notice('已套用 AI 設定。輸入訊息開始聊天。');
+      if (!keySaved) notice('已套用設定，但未能記住 API key。目前分頁仍可使用，重新整理後需再輸入。');
+      else if (remembered) notice(rememberKey && apiKey ? '已套用設定並記住 API key，重新整理後可繼續使用。' : '已套用 AI 設定。輸入訊息開始聊天。');
       input.focus();
     });
     listen(ref('settings-form').elements.protocol, 'change', () => {
@@ -880,6 +922,7 @@
       }
     });
     listen(ref('settings-form').elements.endpoint, 'input', updateProviderNote);
+    listen(ref('settings-form').elements.apiKey, 'input', updateKeyStatus);
     listen(input, 'input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 140) + 'px'; });
     listen(input, 'keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(input.value); }
@@ -895,6 +938,11 @@
       }
     });
     listen(global, 'storage', (event) => {
+      if ((event.key === credentialKey && event.newValue === null || event.key === null) && config.rememberKey) {
+        config.apiKey = '';
+        ref('settings-form').elements.apiKey.value = '';
+        updateKeyStatus();
+      }
       if (event.key === null || event.key?.startsWith(prefix)) {
         if ((event.key === prefix + active.id || event.key === null) && !read(prefix + active.id) && active.save) {
           active.save = false;
@@ -911,7 +959,10 @@
       config.model = typeof connection.model === 'string' ? connection.model : '';
       config.protocol = connection.protocol;
       if (options.stream === undefined && typeof connection.stream === 'boolean') config.stream = connection.stream;
+      if (options.rememberKey === undefined && typeof connection.rememberKey === 'boolean') config.rememberKey = connection.rememberKey;
     }
+    const credential = read(credentialKey);
+    if (options.apiKey === undefined && !config.apiKey && config.rememberKey && credential?.endpoint === config.endpoint && typeof credential.apiKey === 'string') config.apiKey = credential.apiKey;
     if (storage && typeof meta?.saveByDefault === 'boolean') defaultSave = meta.saveByDefault;
     const restored = typeof meta?.activeId === 'string' ? sanitize(read(prefix + meta.activeId)) : null;
     active = restored ? { ...restored, save: true } : blank();
