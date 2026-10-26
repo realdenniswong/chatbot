@@ -330,11 +330,11 @@
             <input data-ref="image-input" class="dc-sr-only" type="file" accept="image/jpeg,image/png,image/webp" tabindex="-1" aria-label="選擇圖片">
             <button type="button" class="dc-attach dc-icon-button" data-action="attach" aria-label="上載圖片" title="上載 JPG、PNG 或 WebP 圖片">${svg('attach')}</button>
             <label class="dc-sr-only" for="${instanceId}-input">輸入訊息</label>
-            <textarea id="${instanceId}-input" data-ref="input" placeholder="輸入問題，隨時問我…" rows="1" maxlength="4000" enterkeyhint="send"></textarea>
+            <textarea id="${instanceId}-input" data-ref="input" placeholder="輸入問題，隨時問我…" rows="1" maxlength="4000" enterkeyhint="enter"></textarea>
             <button type="submit" class="dc-send" aria-label="傳送訊息">${svg('arrow')}</button>
             <button type="button" class="dc-send dc-stop" data-ref="stop" data-action="stop" aria-label="停止回覆" title="停止回覆" hidden>${svg('stop')}</button>
           </form>
-          <p class="dc-disclaimer">Enter 傳送 · Shift + Enter 換行 · 圖片分析需模型支援 <button data-action="settings">設定 AI</button></p>
+          <p class="dc-disclaimer"><span class="dc-desktop-key-hint">Enter 傳送 · Shift + Enter 換行</span><span class="dc-phone-key-hint">Return 換行 · 撳按鈕傳送</span> · 圖片分析需模型支援 <button data-action="settings">設定 AI</button></p>
           <p class="dc-notice" data-ref="notice" role="status"></p>
         </footer>
       </section>
@@ -970,7 +970,7 @@
     listen(ref('settings-form').elements.apiKey, 'input', updateKeyStatus);
     listen(input, 'input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 140) + 'px'; });
     listen(input, 'keydown', (event) => {
-      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(input.value); }
+      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !matchMedia('(pointer: coarse)').matches) { event.preventDefault(); send(input.value); }
     });
     listen(root, 'keydown', (event) => {
       if (event.key === 'Escape' && root.classList.contains('dc-history-visible')) showHistory(false);
