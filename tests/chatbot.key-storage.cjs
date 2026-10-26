@@ -35,6 +35,7 @@ const path = require('node:path');
   const storedKey = () => page.evaluate(() => JSON.parse(localStorage.getItem('chatbot-app:/ChatBot/:api-key') || 'null'));
   try {
     await page.goto(url);
+    assert.equal(await page.locator('[data-ref="mode"]').innerText(), 'gpt-6.1-sol', 'new connections use the requested default model');
     await openSettings();
     await page.locator('[name="protocol"]').selectOption('responses');
     await page.locator('[name="endpoint"]').fill('https://chat.example.test/key-api');
@@ -137,8 +138,34 @@ const path = require('node:path');
     await page.evaluate(() => { Storage.prototype.removeItem = window.originalRemove; });
     await page.getByRole('button', { name: '清除 key', exact: true }).click();
     assert.equal(await storedKey(), null);
+    // Upgrading the previous default must preserve keys, chat history and connection choices.
+    const historyBeforeMigration = await page.evaluate(() => chatbot.getConversation().messages);
+    await context.route('https://tianyuai.lol/v1/chat/completions', async route => {
+      requests.push({ body: route.request().postDataJSON(), authorization: route.request().headers().authorization });
+      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: '模型設定測試成功' } }] }) });
+    });
+    await page.evaluate(() => {
+      const endpoint = 'https://tianyuai.lol/v1/chat/completions';
+      localStorage.setItem('chatbot-app:/ChatBot/:connection', JSON.stringify({ endpoint, model: 'gpt-5.6-luna', protocol: 'chat-completions', stream: false, rememberKey: true }));
+      localStorage.setItem('chatbot-app:/ChatBot/:api-key', JSON.stringify({ endpoint, apiKey: 'test-migration-key' }));
+    });
+    await page.reload();
+    assert.equal(await page.locator('[data-ref="mode"]').innerText(), 'gpt-6.1-sol');
+    assert.deepEqual(await page.evaluate(() => chatbot.getConversation().messages), historyBeforeMigration);
+    await send('模型設定測試');
+    assert.equal(requests.at(-1).body.model, 'gpt-6.1-sol');
+    assert.equal(requests.at(-1).body.stream, false);
+    assert.equal(requests.at(-1).authorization, 'Bearer test-migration-key');
+    assert.equal((await storedKey()).apiKey, 'test-migration-key');
+    await page.evaluate(() => {
+      const key = 'chatbot-app:/ChatBot/:connection';
+      const connection = JSON.parse(localStorage.getItem(key));
+      localStorage.setItem(key, JSON.stringify({ ...connection, model: 'my-selected-model' }));
+    });
+    await page.reload();
+    assert.equal(await page.locator('[data-ref="mode"]').innerText(), 'my-selected-model', 'explicit custom models are preserved');
     assert.deepEqual(errors, []);
-    console.log('PASS: remembered keys survive reload, memory-only opt-out, independent chat saving, no credentials in transcripts/exports, endpoint binding, clearing across tabs, and storage failures.');
+    console.log('PASS: remembered keys survive reload, memory-only opt-out, independent chat saving, no credentials in transcripts/exports, endpoint binding, clearing across tabs, storage failures, and model migration preserving credentials/history/preferences.');
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));
