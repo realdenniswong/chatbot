@@ -149,9 +149,9 @@ body:has(> #chatbot) { margin: 0; background: #f6f5f1; }
 .chatbot-app .dc-saved-label { color: #7a8a6e; }
 .chatbot-app .dc-export { display: flex; align-items: center; gap: 5px; padding: 3px 0; background: transparent; border: 0; color: #929b87; font-size: 10px; }
 .chatbot-app .dc-export svg { width: 12px; height: 12px; }
-.chatbot-app .dc-composer { display: flex; align-items: flex-end; gap: 12px; padding: 12px 12px 12px 18px; border: 1px solid #dcded2; border-radius: 14px; background: #fff; box-shadow: 0 4px 15px #34432905; }
+.chatbot-app .dc-composer { display: flex; align-items: flex-end; gap: 12px; padding: 6px 8px; border: 1px solid #dcded2; border-radius: 14px; background: #fff; box-shadow: 0 4px 15px #34432905; }
 .chatbot-app .dc-composer:focus-within { border-color: #aab59c; box-shadow: 0 0 0 3px #aab59c12; }
-.chatbot-app textarea { display: block; resize: none; min-height: 28px; max-height: 140px; width: 100%; border: 0; outline: 0; color: #424e39; background: transparent; line-height: 28px; padding: 3px 0; font-size: 13px; border-radius: 0; }
+.chatbot-app textarea { display: block; align-self: center; resize: none; min-height: 20px; max-height: 140px; width: 100%; border: 0; outline: 0; color: #424e39; background: transparent; line-height: 20px; padding: 0; font-size: 13px; border-radius: 0; }
 .chatbot-app textarea::placeholder { color: #a4aa99; }
 .chatbot-app .dc-send { border: 0; width: 35px; height: 35px; flex: 0 0 35px; border-radius: 9px; display: grid; place-items: center; background: #6b7c5c; color: white; }
 .chatbot-app .dc-send:hover { background: #536546; }
@@ -225,7 +225,7 @@ body:has(> #chatbot) { margin: 0; background: #f6f5f1; }
   .chatbot-app .dc-suggestions strong { font-size: 11px; }
   .chatbot-app .dc-suggestions button > span:last-of-type { font-size: 9px; }
   .chatbot-app .dc-composer-area { padding: 0 20px max(14px, env(safe-area-inset-bottom)); }
-  .chatbot-app textarea { font-size: 16px; }
+  .chatbot-app textarea { font-size: 16px; line-height: 22px; min-height: 22px; }
   .chatbot-app .dc-settings input, .chatbot-app .dc-settings select { font-size: 16px; }
   .chatbot-app .dc-disclaimer { font-size: 8px; }
   .chatbot-app .dc-message { gap: 11px; }
