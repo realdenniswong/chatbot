@@ -182,7 +182,7 @@
     else if (detail?.code === 'model_not_found' || /model.*not.*found|模型不存在|模型已下[线線]/i.test(message)) error.kind = 'model_unavailable';
     return error;
   }
-  async function streamReply(response, protocol, onDelta) {
+  async function streamReply(response, protocol, onDelta, onProgress) {
     if (!response.body) throw new Error('empty_stream');
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -205,14 +205,17 @@
       if (protocol === 'chat-completions') {
         const choice = data.choices?.find((item) => item.index === 0 || item.index === undefined);
         const delta = choice?.delta;
+        if (delta?.reasoning_content || delta?.reasoning) onProgress({ stage: 'processing' });
         if (typeof delta?.content === 'string') publish(delta.content);
         if (typeof delta?.refusal === 'string') publish(delta.refusal);
         if (choice?.finish_reason) {
-          terminal = true;
+          // A completion marker is sufficient; some relays leave the HTTP stream open.
+          ended = terminal = true;
           if (choice.finish_reason !== 'stop' && status !== 'limit') status = 'incomplete';
         }
       } else {
         const type = data.type || name;
+        if (typeof type === 'string' && type.startsWith('response.reasoning')) onProgress({ stage: 'processing' });
         if (['response.output_text.delta', 'response.refusal.delta'].includes(type) && typeof data.delta === 'string') publish(data.delta);
         if (type === 'response.failed') throw serviceError(data.response?.error || data, response.status);
         if (type === 'response.completed' || type === 'response.incomplete') {
@@ -249,6 +252,7 @@
     try {
       while (!ended) {
         const chunk = await reader.read();
+        if (chunk.value?.length) onProgress({ chunk: true });
         buffer += decoder.decode(chunk.value, { stream: !chunk.done });
         consume(chunk.done);
         if (chunk.done) break;
@@ -259,6 +263,12 @@
       await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
+  }
+
+  function safeDelivery(value) {
+    if (!isRecord(value) || !['stream', 'complete'].includes(value.mode) || !Number.isFinite(value.totalMs) || value.totalMs < 0 || value.totalMs > 1e12) return null;
+    const firstTextMs = Number.isFinite(value.firstTextMs) && value.firstTextMs >= 0 ? Math.min(value.firstTextMs, value.totalMs) : null;
+    return { mode: value.mode, firstTextMs, totalMs: value.totalMs, chunks: Number.isFinite(value.chunks) ? Math.max(0, Math.min(1000000, Math.floor(value.chunks))) : 0 };
   }
 
   function mount(target, options = {}) {
@@ -408,7 +418,7 @@
     function sanitize(value) {
       if (!isRecord(value) || value.version !== 1 || typeof value.id !== 'string' || !Array.isArray(value.messages)) return null;
       const messages = value.messages.filter((m) => isRecord(m) && ['user', 'assistant'].includes(m.role) && typeof m.content === 'string').map((m) => ({
-        role: m.role, content: m.content.slice(0, 16000), at: typeof m.at === 'string' ? m.at : '', links: safeLinks(m.links), ...(['stopped', 'incomplete', 'limit'].includes(m.status) ? { status: m.status } : {}), ...(m.role === 'user' && safeImage(m.image) ? { image: safeImage(m.image) } : {}),
+        role: m.role, content: m.content.slice(0, 16000), at: typeof m.at === 'string' ? m.at : '', links: safeLinks(m.links), ...(['stopped', 'incomplete', 'limit'].includes(m.status) ? { status: m.status } : {}), ...(m.role === 'assistant' && safeDelivery(m.delivery) ? { delivery: safeDelivery(m.delivery) } : {}), ...(m.role === 'user' && safeImage(m.image) ? { image: safeImage(m.image) } : {}),
       }));
       if (!messages.length) return null;
       return { version: 1, id: value.id, title: String(value.title || '新對話').slice(0, 60), createdAt: String(value.createdAt || ''), updatedAt: String(value.updatedAt || ''), messages };
@@ -551,6 +561,15 @@
       else content.textContent = message.content;
       body.append(header, content);
       if (message.status) body.append(textNode('div', 'dc-message-status', message.status === 'stopped' ? '已停止回覆' : message.status === 'limit' ? '回覆已達顯示長度上限。' : '回覆中斷，已保留已收到的內容。'));
+      const delivery = safeDelivery(message.delivery);
+      if (delivery) {
+        const details = textNode('details', 'dc-delivery-info', '');
+        details.append(textNode('summary', '', '回覆資訊'));
+        details.append(textNode('p', '', '接收方式：' + (delivery.mode === 'stream' ? '串流接收（' + delivery.chunks + ' 批資料）' : '完整回覆一次接收')));
+        details.append(textNode('p', '', delivery.firstTextMs === null ? '未收到文字回覆。' : '開始收到文字：' + (delivery.firstTextMs / 1000).toFixed(1) + ' 秒'));
+        details.append(textNode('p', '', (message.status ? '結束等候：' : '回覆完成：') + (delivery.totalMs / 1000).toFixed(1) + ' 秒'));
+        body.append(details);
+      }
       const image = safeImage(message.image);
       if (image) {
         const preview = document.createElement('img');
@@ -577,8 +596,8 @@
       renderHistory();
       scroll();
     }
-    function append(role, content, links = [], image = null) {
-      const message = { role, content, at: new Date().toISOString(), links: safeLinks(links), ...(safeImage(image) ? { image: safeImage(image) } : {}) };
+    function append(role, content, links = [], image = null, delivery = null) {
+      const message = { role, content, at: new Date().toISOString(), links: safeLinks(links), ...(role === 'assistant' && safeDelivery(delivery) ? { delivery: safeDelivery(delivery) } : {}), ...(safeImage(image) ? { image: safeImage(image) } : {}) };
       active.messages.push(message);
       active.updatedAt = message.at;
       if (role === 'user' && active.title === '新對話') active.title = content.replace(/\s+/g, ' ').slice(0, 40);
@@ -686,7 +705,7 @@
       renderHistory();
       return true;
     }
-    async function request(message, signal, onDelta) {
+    async function request(message, signal, onDelta, onProgress) {
       const history = active.messages.slice(0, -1).map(({ role, content, image }) => ({ role, content, ...(safeImage(image) ? { image: safeImage(image) } : {}) }));
       const image = safeImage(active.messages.at(-1)?.image);
       const payload = { message, history, request_id: uid(), ...(image ? { image } : {}) };
@@ -706,7 +725,9 @@
       const headers = { 'Content-Type': 'application/json' };
       if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
       const response = await fetch(config.endpoint, { method: 'POST', headers, body: JSON.stringify(body), credentials: 'omit', signal });
-      if (response.ok && config.protocol !== 'custom' && response.headers.get('Content-Type')?.includes('text/event-stream')) return streamReply(response, config.protocol, onDelta);
+      const isStream = response.ok && config.protocol !== 'custom' && response.headers.get('Content-Type')?.toLowerCase().includes('text/event-stream');
+      onProgress({ mode: isStream ? 'stream' : 'complete', stage: isStream ? 'connected' : 'complete' });
+      if (isStream) return streamReply(response, config.protocol, onDelta, onProgress);
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.error) throw serviceError(data, response.status);
       if (config.protocol === 'custom') return data;
@@ -733,10 +754,30 @@
       clearImage();
       input.value = '';
       input.style.height = '';
-      const pending = textNode('div', 'dc-pending', '助手正在回覆…');
+      const pending = textNode('div', 'dc-pending', '');
+      const pendingLabel = textNode('span', '', '等候模型回覆…');
+      const pendingElapsed = textNode('span', 'dc-wait-elapsed', '');
+      pendingElapsed.setAttribute('aria-hidden', 'true');
+      pending.append(pendingLabel, pendingElapsed);
       ref('messages').append(pending);
       scroll();
-      let timedOut = false;
+      const startedAt = performance.now();
+      const delivery = { mode: 'complete', firstTextMs: null, totalMs: 0, chunks: 0 };
+      const deliveryInfo = () => ({ ...delivery, totalMs: Math.max(0, performance.now() - startedAt) });
+      const updateWait = () => {
+        const seconds = Math.floor((performance.now() - startedAt) / 1000);
+        pendingElapsed.textContent = '已等候 ' + (seconds >= 60 ? Math.floor(seconds / 60) + ' 分 ' : '') + seconds % 60 + ' 秒 · 可隨時停止回覆';
+      };
+      updateWait();
+      // This timer only updates the waiting label. Requests have no automatic deadline.
+      const waitTimer = setInterval(updateWait, 1000);
+      const onProgress = (progress) => {
+        if (destroyed || controller.signal.aborted) return;
+        if (progress.mode) delivery.mode = progress.mode;
+        if (progress.chunk) delivery.chunks++;
+        if (progress.stage) pendingLabel.textContent = progress.stage === 'processing' ? '模型正在處理，等候文字回覆…'
+          : progress.stage === 'complete' ? '等候服務傳回完整回覆…' : '服務已連接，等候文字回覆…';
+      };
       let draft = null, draftRow = null, paint = null, lastSaved = 0;
       const paintDraft = () => {
         paint = null;
@@ -748,6 +789,8 @@
       };
       const onDelta = (text) => {
         if (destroyed || controller.signal.aborted || typeof text !== 'string' || !text) return;
+        delivery.mode = 'stream';
+        if (delivery.firstTextMs === null) delivery.firstTextMs = Math.max(0, performance.now() - startedAt);
         pending.remove();
         if (!draft) {
           draft = append('assistant', text.slice(0, 16000));
@@ -778,10 +821,9 @@
         onAbort = () => reject(new Error('aborted'));
         controller.signal.addEventListener('abort', onAbort, { once: true });
       });
-      const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 120000);
       try {
         const result = await Promise.race([
-          request(message, controller.signal, onDelta), aborted,
+          request(message, controller.signal, onDelta, onProgress), aborted,
         ]);
         if (destroyed) return false;
         if (!result || typeof result.reply !== 'string' || !result.reply.trim()) throw new Error('empty_reply');
@@ -791,6 +833,8 @@
           draftRow = ref('messages').lastElementChild;
         }
         draft.content = result.reply.slice(0, 16000);
+        if (delivery.firstTextMs === null) delivery.firstTextMs = Math.max(0, performance.now() - startedAt);
+        draft.delivery = deliveryInfo();
         draft.links = safeLinks(result.links);
         if (['stopped', 'incomplete', 'limit'].includes(result.status)) draft.status = result.status;
         else if (result.reply.length > 16000) draft.status = 'limit';
@@ -798,23 +842,24 @@
       } catch (error) {
         if (destroyed) return false;
         pending.remove();
-        const reason = timedOut ? '連線逾時，請稍後再試。'
-          : error.kind === 'channel_unavailable' ? 'API 供應商目前沒有此模型的可用渠道。請確認令牌分組及模型名稱，或稍後再試。'
+        const reason = error.kind === 'channel_unavailable' ? 'API 供應商目前沒有此模型的可用渠道。請確認令牌分組及模型名稱，或稍後再試。'
           : error.kind === 'model_unavailable' ? 'API 服務未提供此模型。請在 AI 設定選擇供應商目前可用的模型名稱。'
           : error.status === 401 || error.status === 403 ? '連線未獲授權，請檢查 API key 及模型權限。'
           : error.status === 429 ? '服務暫時達到用量上限，請稍後再試。'
+          : [408, 504, 524].includes(error.status) ? '模型服務連線逾時，未能收到完整回覆。請稍後再試。'
           : error.status === 400 && active.messages.some((m) => m.image) ? '服務未接受圖片請求。請確認目前模型及渠道支援圖片輸入，或開始新對話只傳文字。'
           : error.status === 413 ? '圖片請求超過服務限制，請改用較小的圖片。'
           : '暫時未能連接 AI，請檢查設定及服務是否允許瀏覽器連線。';
         const stopped = controller.signal.reason === 'user';
         if (draft) {
+          draft.delivery = deliveryInfo();
           draft.status = stopped ? 'stopped' : 'incomplete';
           finishDraft();
           if (!stopped) notice(reason + ' 已保留收到的部分回覆。');
         } else if (stopped) notice('已停止回覆。');
-        else append('assistant', reason);
+        else append('assistant', reason, [], null, deliveryInfo());
       } finally {
-        clearTimeout(timeout);
+        clearInterval(waitTimer);
         controller.signal.removeEventListener('abort', onAbort);
         if (paint !== null) cancelAnimationFrame(paint);
         pending.remove();

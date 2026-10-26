@@ -13,7 +13,7 @@ const path = require('node:path');
     if (request.url.startsWith('/stream/')) {
       let input = '';
       for await (const chunk of request) input += chunk;
-      response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      response.writeHead(request.url.endsWith('/upstream-timeout') ? 504 : 200, { 'Content-Type': request.url.endsWith('/json') || request.url.endsWith('/upstream-timeout') ? 'application/json' : 'text/event-stream', 'Cache-Control': 'no-cache' });
       response.flushHeaders();
       const session = { response, body: JSON.parse(input), closed: false };
       response.on('close', () => { session.closed = true; });
@@ -33,10 +33,10 @@ const path = require('node:path');
   const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  const mount = (protocol = 'chat-completions') => page.evaluate(({ url, protocol }) => {
+  const mount = (protocol = 'chat-completions', endpointPath = protocol) => page.evaluate(({ url, protocol, endpointPath }) => {
     window.chatbot.destroy();
-    window.chatbot = Chatbot.mount('#chatbot', { storageKey: 'stream-' + protocol, endpoint: url + '/stream/' + protocol, model: 'test-model', protocol });
-  }, { url, protocol });
+    window.chatbot = Chatbot.mount('#chatbot', { storageKey: 'stream-' + protocol, endpoint: url + '/stream/' + endpointPath, model: 'test-model', protocol });
+  }, { url, protocol, endpointPath });
   const start = async (prompt = 'stream test') => {
     const nextSession = new Promise((resolve) => { acceptSession = resolve; });
     await page.getByRole('textbox', { name: '輸入訊息' }).fill(prompt);
@@ -77,6 +77,8 @@ const path = require('node:path');
     await mount();
     assert.equal(await last().locator('table').count(), 1, 'Markdown persists as text and is formatted again on reload');
     assert.equal(await last().locator('strong').count(), 2);
+    assert.equal((await page.evaluate(() => chatbot.getConversation())).messages.at(-1).delivery.mode, 'stream');
+    assert.equal(await last().locator('.dc-delivery-info summary').innerText(), '回覆資訊');
 
     await mount();
     session = await start('stop test');
@@ -108,6 +110,51 @@ const path = require('node:path');
     await idle();
     assert.equal((await page.evaluate(() => chatbot.getConversation())).messages.at(-1).content.length, 16000);
     assert.match(await last().innerText(), /顯示長度上限/);
+
+    // A slow reasoning/connection phase must survive the former 120-second deadline.
+    await page.clock.install();
+    session = await start('slow first text test');
+    session.response.write(event({ choices: [{ index: 0, delta: { reasoning_content: 'PRIVATE REASONING MUST NOT BE DISPLAYED' } }] }));
+    await page.waitForFunction(() => document.querySelector('.dc-pending')?.textContent.includes('模型正在處理'));
+    await page.clock.fastForward(180000);
+    assert.equal(await page.getByRole('textbox', { name: '輸入訊息' }).isDisabled(), true, 'no application abort after 180 seconds without text');
+    assert.equal(session.closed, false);
+    assert.match(await page.locator('.dc-pending').innerText(), /已等候 3 分/);
+    assert.ok(!(await page.locator('.dc-messages').innerText()).includes('PRIVATE REASONING'));
+    session.response.write(delta('等候三分鐘後收到的第一段。'));
+    await page.waitForFunction(() => document.querySelector('.is-streaming')?.textContent.includes('第一段'));
+    await page.clock.fastForward(2000);
+    // The relay deliberately does not send [DONE] or close its socket.
+    session.response.write(delta('第二段已收到。') + event({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }));
+    await idle();
+    const slowInfo = (await page.evaluate(() => chatbot.getConversation())).messages.at(-1).delivery;
+    assert.equal(slowInfo.mode, 'stream');
+    assert.ok(slowInfo.firstTextMs >= 180000);
+    assert.ok(slowInfo.totalMs > slowInfo.firstTextMs);
+    assert.ok(slowInfo.chunks >= 2);
+    assert.match(await last().innerText(), /第一段[\s\S]*第二段/);
+    assert.equal(await page.locator('.dc-pending').count(), 0);
+
+    // A service returning complete JSON is displayed honestly, with no fake typing delay.
+    await mount('chat-completions', 'json');
+    session = await start('slow complete response test');
+    await page.waitForFunction(() => document.querySelector('.dc-pending')?.textContent.includes('完整回覆'));
+    await page.clock.fastForward(180000);
+    assert.equal(session.closed, false);
+    assert.equal(await page.getByRole('textbox', { name: '輸入訊息' }).isDisabled(), true);
+    session.response.end(JSON.stringify({ choices: [{ message: { content: '完整 JSON 一次接收' } }] }));
+    await idle();
+    const completeInfo = (await page.evaluate(() => chatbot.getConversation())).messages.at(-1).delivery;
+    assert.equal(completeInfo.mode, 'complete');
+    assert.ok(completeInfo.firstTextMs >= 180000);
+    await last().locator('.dc-delivery-info summary').click();
+    assert.match(await last().locator('.dc-delivery-info').innerText(), /完整回覆一次接收/);
+
+    await mount('chat-completions', 'upstream-timeout');
+    session = await start('upstream timeout test');
+    session.response.end(JSON.stringify({ error: { message: 'gateway timeout' } }));
+    await idle();
+    assert.match(await last().innerText(), /模型服務連線逾時/);
 
     await mount('responses');
     session = await start('responses test');
@@ -175,7 +222,7 @@ const path = require('node:path');
     await page.getByRole('button', { name: '設定 AI', exact: true }).click();
     assert.equal(await page.locator('[name="stream"]').isChecked(), false, 'streaming preference survives reload');
     assert.deepEqual(errors, []);
-    console.log('PASS: incremental SSE, UTF-8, Markdown, both API formats, JSON fallback (main suite), stopping, disconnects, errors, output cap, opt-out while streaming, saved formatting, XSS and mobile layout.');
+    console.log('PASS: incremental SSE, UTF-8, Markdown, both API formats, no 120-second deadline, slow reasoning/JSON responses, completion without socket closure, delivery timing, upstream timeouts, stopping, disconnects, errors, output cap, opt-out while streaming, saved formatting, XSS and mobile layout.');
   } finally {
     for (const session of sessions) session.response.destroy();
     await browser.close();

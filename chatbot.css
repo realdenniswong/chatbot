@@ -129,6 +129,9 @@ body:has(> #chatbot) { margin: 0; background: #f6f5f1; }
 .chatbot-app .dc-rich-text > :first-child, .chatbot-app .dc-rich-text blockquote > :first-child { margin-top: 0; }
 .chatbot-app .dc-rich-text > :last-child, .chatbot-app .dc-rich-text blockquote > :last-child { margin-bottom: 0; }
 .chatbot-app .dc-message-status { margin-top: 12px; color: #9a825e; font-size: 11px; }
+.chatbot-app .dc-delivery-info { margin-top: 12px; color: #8a957f; font-size: 10px; line-height: 1.8; }
+.chatbot-app .dc-delivery-info summary { cursor: pointer; width: fit-content; }
+.chatbot-app .dc-delivery-info p { margin: 4px 0 0; }
 .chatbot-app .is-streaming .dc-message-author::after { content: '回覆中'; color: #879a75; font-size: 10px; font-weight: 400; }
 .chatbot-app .dc-message-link { display: inline-block; margin: 12px 8px 0 0; color: #9b663e; font-size: 12px; text-underline-offset: 4px; }
 .chatbot-app .dc-message-image { display: block; max-width: min(100%, 420px); max-height: 420px; object-fit: contain; border: 1px solid #e1e5d9; border-radius: 9px; margin-top: 12px; }
@@ -139,7 +142,8 @@ body:has(> #chatbot) { margin: 0; background: #f6f5f1; }
 .chatbot-app .dc-image-preview span { font-size: 9px; color: #8b977f; }
 .chatbot-app .dc-attach { align-self: flex-end; width: 28px; height: 35px; margin-left: -4px; }
 .chatbot-app .dc-attach svg { width: 18px; height: 18px; }
-.chatbot-app .dc-pending { color: #919987; padding: 15px 0 10px 45px; font-size: 12px; }
+.chatbot-app .dc-pending { display: grid; gap: 4px; color: #919987; padding: 15px 0 10px 45px; font-size: 12px; }
+.chatbot-app .dc-wait-elapsed { color: #a0a994; font-size: 10px; }
 .chatbot-app .dc-composer-area { width: min(100%, 820px); margin: 0 auto; padding: 0 36px 18px; flex-shrink: 0; }
 .chatbot-app .dc-thread-actions { display: flex; justify-content: space-between; align-items: center; padding: 0 3px 9px; font-size: 10px; color: #969e8d; }
 .chatbot-app .dc-saved-label { color: #7a8a6e; }
