@@ -13,6 +13,7 @@
     settings: '<path d="M4 7h16M4 17h16M8 4v6M16 14v6"/>',
     attach: '<path d="m21 11-8 8a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.7 5.7l-9 9a2 2 0 0 1-2.8-2.8l8-8"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a17 17 0 0 1 0 18 17 17 0 0 1 0-18Z"/>',
   };
   const svg = (name) => '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + icons[name] + '</svg>';
   const uid = () => global.crypto?.randomUUID?.() || Date.now().toString(36) + Math.random().toString(36).slice(2);
@@ -173,6 +174,79 @@
       ? (Array.isArray(data.output) ? data.output : []).filter((item) => item.type === 'message').flatMap((item) => item.content || []).map((part) => part.type === 'output_text' ? part.text : part.type === 'refusal' ? part.refusal : '').join('\n')
       : data.choices?.[0]?.message?.content;
   }
+  function safeSources(value) {
+    const seen = new Set();
+    return (Array.isArray(value) ? value : []).slice(0, 200).flatMap((source) => {
+      if (!isRecord(source) || typeof source.url !== 'string') return [];
+      try {
+        const url = new URL(source.url);
+        if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || seen.has(url.href)) return [];
+        seen.add(url.href);
+        return [{ url: url.href, title: typeof source.title === 'string' && source.title.trim() ? source.title.slice(0, 180) : url.hostname }];
+      } catch (_) { return []; }
+    }).slice(0, 30);
+  }
+  function safeCitations(value, length = 16000) {
+    return (Array.isArray(value) ? value : []).slice(0, 100).flatMap((citation) => {
+      const source = safeSources([citation])[0];
+      if (!source || !Number.isInteger(citation.start) || !Number.isInteger(citation.end) || citation.start < 0 || citation.end < citation.start || citation.end > length) return [];
+      return [{ ...source, start: citation.start, end: citation.end }];
+    });
+  }
+  function responseResult(data) {
+    let reply = '';
+    const citations = [], sources = [];
+    for (const item of Array.isArray(data.output) ? data.output : []) {
+      if (item?.type === 'message') {
+        for (const part of item.content || []) {
+          const text = part?.type === 'output_text' ? part.text : part?.type === 'refusal' ? part.refusal : '';
+          if (typeof text !== 'string' || !text) continue;
+          const offset = reply.length + (reply ? 1 : 0);
+          if (reply) reply += '\n';
+          reply += text;
+          for (const annotation of Array.isArray(part.annotations) ? part.annotations : []) {
+            if (annotation?.type === 'url_citation') {
+              sources.push({ url: annotation.url, title: annotation.title });
+              if (Number.isInteger(annotation.start_index) && Number.isInteger(annotation.end_index)) citations.push({ url: annotation.url, title: annotation.title, start: offset + annotation.start_index, end: offset + annotation.end_index });
+            }
+          }
+        }
+      } else if (item?.type === 'web_search_call') {
+        if (Array.isArray(item.action?.sources)) sources.push(...item.action.sources);
+        if (item.action?.type === 'open_page') sources.push({ url: item.action.url });
+      }
+    }
+    const safe = safeCitations(citations, reply.length);
+    return { reply, citations: safe, sources: safeSources([...safe, ...sources]) };
+  }
+  function citedText(message) {
+    const citations = safeCitations(message.citations, message.content.length).sort((a, b) => a.start - b.start || a.end - b.end);
+    const urls = [...new Set(citations.map((citation) => citation.url))];
+    let text = '', offset = 0;
+    for (let i = 0; i < citations.length;) {
+      const citation = citations[i++], group = [citation];
+      while (i < citations.length && citations[i].start === citation.start && citations[i].end === citation.end) group.push(citations[i++]);
+      if (citation.start < offset) continue;
+      text += message.content.slice(offset, citation.start);
+      const quoted = message.content.slice(citation.start, citation.end);
+      if (!quoted.includes('\uE200')) text += quoted;
+      const unique = [...new Set(group.map((entry) => entry.url))];
+      text += ' ' + unique.map((url) => '[〔' + (urls.indexOf(url) + 1) + '〕](' + url.replace(/[()]/g, (char) => char === '(' ? '%28' : '%29') + ')').join(' ');
+      offset = citation.end;
+    }
+    return (text + message.content.slice(offset)).replace(/\uE200cite\uE202[^\uE201]*\uE201/g, '');
+  }
+  function assistantContent(message) {
+    const fragment = markdown(citedText(message));
+    const citations = safeCitations(message.citations, message.content.length);
+    fragment.querySelectorAll('a').forEach((anchor) => {
+      if (/^〔\d+〕$/.test(anchor.textContent)) {
+        anchor.className = 'dc-citation';
+        anchor.title = citations.find((citation) => citation.url === anchor.href)?.title || '查看來源';
+      }
+    });
+    return fragment;
+  }
   function serviceError(data, status) {
     const error = new Error('request_failed');
     error.status = status;
@@ -180,6 +254,7 @@
     const message = typeof detail === 'string' ? detail : typeof detail?.message === 'string' ? detail.message : '';
     if (/no available channel|無可用管道|无可用渠道|distributor/i.test(message)) error.kind = 'channel_unavailable';
     else if (detail?.code === 'model_not_found' || /model.*not.*found|模型不存在|模型已下[线線]/i.test(message)) error.kind = 'model_unavailable';
+    else if (/web_search|web search|tools/i.test(message) && /unsupported|not supported|not available|invalid|unknown/i.test(message)) error.kind = 'search_unavailable';
     return error;
   }
   async function streamReply(response, protocol, onDelta, onProgress) {
@@ -188,10 +263,18 @@
     const decoder = new TextDecoder();
     let buffer = '', dataLines = [], eventName = '', eventSize = 0;
     let reply = '', ended = false, terminal = false, status;
+    const outputItems = new Map();
+    let web = { sources: [], citations: [] };
     function publish(text, replace = false) {
       reply = (replace ? text : reply + text).slice(0, 16000);
       onDelta(reply);
       if (reply.length >= 16000) { status = 'limit'; ended = true; }
+    }
+    function refreshResponse() {
+      const result = responseResult({ output: [...outputItems].sort((a, b) => a[0] - b[0]).map(([, item]) => item) });
+      web = { sources: result.sources, citations: result.citations };
+      if (result.reply && result.reply !== reply) publish(result.reply, true);
+      onProgress(web);
     }
     function dispatch() {
       const source = dataLines.join('\n');
@@ -216,11 +299,36 @@
       } else {
         const type = data.type || name;
         if (typeof type === 'string' && type.startsWith('response.reasoning')) onProgress({ stage: 'processing' });
-        if (['response.output_text.delta', 'response.refusal.delta'].includes(type) && typeof data.delta === 'string') publish(data.delta);
+        if (['response.web_search_call.in_progress', 'response.web_search_call.searching'].includes(type)) onProgress({ stage: 'searching' });
+        if (type === 'response.web_search_call.completed') onProgress({ stage: 'search-done' });
+        const index = Number.isInteger(data.output_index) && data.output_index >= 0 && data.output_index <= 1000 ? data.output_index : 0;
+        if (['response.output_item.added', 'response.output_item.done'].includes(type) && ['message', 'web_search_call'].includes(data.item?.type)) {
+          outputItems.set(index, data.item);
+          if (data.item.type === 'web_search_call') onProgress({ stage: data.item.status === 'completed' ? 'search-done' : 'searching' });
+          refreshResponse();
+        }
+        if (['response.output_text.delta', 'response.refusal.delta', 'response.output_text.annotation.added', 'response.content_part.done'].includes(type)) {
+          const item = outputItems.get(index) || { type: 'message', content: [] };
+          if (item.type === 'message') {
+            const partIndex = Number.isInteger(data.content_index) && data.content_index >= 0 && data.content_index <= 100 ? data.content_index : 0;
+            const part = item.content[partIndex] || { type: type === 'response.refusal.delta' ? 'refusal' : 'output_text', text: '', annotations: [] };
+            if (typeof data.delta === 'string') {
+              const field = type === 'response.refusal.delta' ? 'refusal' : 'text';
+              part[field] = (part[field] || '') + data.delta;
+            }
+            if (type === 'response.output_text.annotation.added' && data.annotation && (part.annotations?.length || 0) < 100) part.annotations = [...(part.annotations || []), data.annotation];
+            item.content[partIndex] = type === 'response.content_part.done' && data.part ? data.part : part;
+            outputItems.set(index, item);
+            refreshResponse();
+          }
+        }
         if (type === 'response.failed') throw serviceError(data.response?.error || data, response.status);
         if (type === 'response.completed' || type === 'response.incomplete') {
-          const finalText = replyText(data.response || {}, protocol);
-          if (finalText) publish(finalText, true);
+          if (data.response?.output?.length) {
+            outputItems.clear();
+            data.response.output.forEach((item, i) => { if (['message', 'web_search_call'].includes(item?.type)) outputItems.set(i, item); });
+            refreshResponse();
+          }
           if (type === 'response.incomplete' && status !== 'limit') status = 'incomplete';
           ended = terminal = true;
         }
@@ -258,7 +366,7 @@
         if (chunk.done) break;
       }
       if (!ended && !terminal) throw new Error('interrupted_stream');
-      return { reply, ...(status ? { status } : {}) };
+      return { reply, ...web, ...(status ? { status } : {}) };
     } finally {
       await reader.cancel().catch(() => {});
       reader.releaseLock();
@@ -275,7 +383,7 @@
     const root = typeof target === 'string' ? document.querySelector(target) : target;
     if (!root) throw new Error('找不到 chatbot 容器。');
     if (root.chatbotInstance) return root.chatbotInstance;
-    const config = { storageKey: 'chatbot-app:' + location.pathname, saveByDefault: true, endpoint: '', model: '', apiKey: '', rememberKey: true, protocol: 'responses', stream: true, ...options.connectionDefaults, ...options };
+    const config = { storageKey: 'chatbot-app:' + location.pathname, saveByDefault: true, endpoint: '', model: '', apiKey: '', rememberKey: true, protocol: 'responses', stream: true, webSearch: false, ...options.connectionDefaults, ...options };
     const prefix = config.storageKey + ':conversation:';
     const metaKey = config.storageKey + ':preferences';
     const connectionKey = config.storageKey + ':connection';
@@ -322,9 +430,10 @@
             </div>
           </div>
           <div class="dc-messages" data-ref="messages" role="log" aria-live="polite" aria-relevant="additions" aria-label="對話訊息"></div>
+          <div class="dc-search-progress" data-ref="search-progress" role="status" hidden></div>
         </div>
         <footer class="dc-composer-area">
-          <div class="dc-thread-actions"><span data-ref="record-status"></span><button data-action="export" class="dc-export">${svg('download')}下載對話</button></div>
+          <div class="dc-thread-actions"><div class="dc-composer-options"><span data-ref="record-status"></span><button type="button" class="dc-search-toggle" data-action="search" aria-pressed="false">${svg('globe')}網頁搜尋</button></div><button data-action="export" class="dc-export">${svg('download')}下載對話</button></div>
           <div class="dc-image-preview" data-ref="image-preview" hidden><img data-ref="image-preview-img" alt="待傳送圖片預覽"><div><strong data-ref="image-name"></strong><span>傳送後交由模型分析 · 已自動調整圖片大小</span></div><button type="button" class="dc-icon-button" data-action="remove-image" aria-label="移除圖片">${svg('close')}</button></div>
           <form class="dc-composer" data-ref="form">
             <input data-ref="image-input" class="dc-sr-only" type="file" accept="image/jpeg,image/png,image/webp" tabindex="-1" aria-label="選擇圖片">
@@ -418,7 +527,7 @@
     function sanitize(value) {
       if (!isRecord(value) || value.version !== 1 || typeof value.id !== 'string' || !Array.isArray(value.messages)) return null;
       const messages = value.messages.filter((m) => isRecord(m) && ['user', 'assistant'].includes(m.role) && typeof m.content === 'string').map((m) => ({
-        role: m.role, content: m.content.slice(0, 16000), at: typeof m.at === 'string' ? m.at : '', links: safeLinks(m.links), ...(['stopped', 'incomplete', 'limit'].includes(m.status) ? { status: m.status } : {}), ...(m.role === 'assistant' && safeDelivery(m.delivery) ? { delivery: safeDelivery(m.delivery) } : {}), ...(m.role === 'user' && safeImage(m.image) ? { image: safeImage(m.image) } : {}),
+        role: m.role, content: m.content.slice(0, 16000), at: typeof m.at === 'string' ? m.at : '', links: safeLinks(m.links), ...(['stopped', 'incomplete', 'limit'].includes(m.status) ? { status: m.status } : {}), ...(m.role === 'assistant' && safeDelivery(m.delivery) ? { delivery: safeDelivery(m.delivery) } : {}), ...(m.role === 'assistant' && safeSources(m.sources).length ? { sources: safeSources(m.sources) } : {}), ...(m.role === 'assistant' && safeCitations(m.citations, Math.min(m.content.length, 16000)).length ? { citations: safeCitations(m.citations, Math.min(m.content.length, 16000)) } : {}), ...(m.role === 'user' && safeImage(m.image) ? { image: safeImage(m.image) } : {}),
       }));
       if (!messages.length) return null;
       return { version: 1, id: value.id, title: String(value.title || '新對話').slice(0, 60), createdAt: String(value.createdAt || ''), updatedAt: String(value.updatedAt || ''), messages };
@@ -557,9 +666,27 @@
         header.append(time);
       }
       const content = textNode('div', 'dc-message-text' + (message.role === 'assistant' ? ' dc-rich-text' : ''), '');
-      if (message.role === 'assistant') content.append(markdown(message.content));
+      if (message.role === 'assistant') content.append(assistantContent(message));
       else content.textContent = message.content;
       body.append(header, content);
+      const sources = safeSources(message.sources);
+      if (message.role === 'assistant' && sources.length) {
+        const details = textNode('details', 'dc-sources', '');
+        details.append(textNode('summary', '', '搜尋來源（' + sources.length + '）'));
+        const list = document.createElement('ul');
+        sources.forEach((source) => {
+          const li = document.createElement('li');
+          const anchor = textNode('a', '', source.title + ' ↗');
+          anchor.href = source.url;
+          anchor.title = source.url;
+          anchor.target = '_blank';
+          anchor.rel = 'noopener noreferrer';
+          li.append(anchor);
+          list.append(li);
+        });
+        details.append(list);
+        body.append(details);
+      }
       if (message.status) body.append(textNode('div', 'dc-message-status', message.status === 'stopped' ? '已停止回覆' : message.status === 'limit' ? '回覆已達顯示長度上限。' : '回覆中斷，已保留已收到的內容。'));
       const delivery = safeDelivery(message.delivery);
       if (delivery) {
@@ -596,8 +723,8 @@
       renderHistory();
       scroll();
     }
-    function append(role, content, links = [], image = null, delivery = null) {
-      const message = { role, content, at: new Date().toISOString(), links: safeLinks(links), ...(role === 'assistant' && safeDelivery(delivery) ? { delivery: safeDelivery(delivery) } : {}), ...(safeImage(image) ? { image: safeImage(image) } : {}) };
+    function append(role, content, links = [], image = null, delivery = null, web = {}) {
+      const message = { role, content, at: new Date().toISOString(), links: safeLinks(links), ...(role === 'assistant' && safeDelivery(delivery) ? { delivery: safeDelivery(delivery) } : {}), ...(role === 'assistant' && safeSources(web.sources).length ? { sources: safeSources(web.sources) } : {}), ...(role === 'assistant' && safeCitations(web.citations, content.length).length ? { citations: safeCitations(web.citations, content.length) } : {}), ...(safeImage(image) ? { image: safeImage(image) } : {}) };
       active.messages.push(message);
       active.updatedAt = message.at;
       if (role === 'user' && active.title === '新對話') active.title = content.replace(/\s+/g, ' ').slice(0, 40);
@@ -611,6 +738,7 @@
     }
     function setBusy(value) {
       busy = value;
+      updateSearchToggle();
       input.disabled = value;
       ref('form').querySelectorAll('button, input').forEach((control) => { control.disabled = value; });
       const generating = value && Boolean(requestController);
@@ -631,6 +759,17 @@
     }
     function updateMode() {
       ref('mode').textContent = config.reply ? '自訂 AI 服務' : config.endpoint ? (config.model || '請設定模型名稱') : '設定 AI 後開始聊天';
+      updateSearchToggle();
+    }
+    function updateSearchToggle() {
+      const button = root.querySelector('[data-action="search"]');
+      const available = !config.reply && config.protocol === 'responses';
+      button.disabled = busy || !available;
+      button.setAttribute('aria-pressed', String(available && config.webSearch));
+      button.title = available ? config.webSearch ? '已開啟：AI 會按需要搜尋網頁' : '開啟網頁搜尋' : '請在 AI 設定選用支援搜尋的連線';
+    }
+    function rememberConnection() {
+      return !storage || write(connectionKey, { endpoint: config.endpoint, model: config.model, protocol: config.protocol, stream: config.stream, rememberKey: config.rememberKey, webSearch: config.webSearch });
     }
     function showSettings() {
       if (busy) return;
@@ -706,7 +845,7 @@
       return true;
     }
     async function request(message, signal, onDelta, onProgress) {
-      const history = active.messages.slice(0, -1).map(({ role, content, image }) => ({ role, content, ...(safeImage(image) ? { image: safeImage(image) } : {}) }));
+      const history = active.messages.slice(0, -1).map((entry) => ({ role: entry.role, content: entry.role === 'assistant' ? citedText(entry) : entry.content, ...(safeImage(entry.image) ? { image: safeImage(entry.image) } : {}) }));
       const image = safeImage(active.messages.at(-1)?.image);
       const payload = { message, history, request_id: uid(), ...(image ? { image } : {}) };
       if (typeof config.reply === 'function') return config.reply({ ...payload, signal, onDelta });
@@ -722,6 +861,11 @@
         : config.protocol === 'chat-completions'
           ? { model: config.model, messages, stream: config.stream }
           : payload;
+      if (config.protocol === 'responses' && config.webSearch) {
+        body.tools = [{ type: 'web_search' }];
+        body.tool_choice = 'auto';
+        body.include = ['web_search_call.action.sources'];
+      }
       const headers = { 'Content-Type': 'application/json' };
       if (config.apiKey) headers.Authorization = 'Bearer ' + config.apiKey;
       const response = await fetch(config.endpoint, { method: 'POST', headers, body: JSON.stringify(body), credentials: 'omit', signal });
@@ -731,9 +875,10 @@
       const data = await response.json().catch(() => ({}));
       if (!response.ok || data.error) throw serviceError(data, response.status);
       if (config.protocol === 'custom') return data;
-      const reply = replyText(data, config.protocol);
+      const result = config.protocol === 'responses' ? responseResult(data) : { reply: replyText(data, config.protocol) };
+      const { reply } = result;
       if (typeof reply !== 'string' || !reply.trim()) throw new Error('empty_reply');
-      return { reply, ...(reply.length > 16000 ? { status: 'limit' } : {}) };
+      return { ...result, ...(reply.length > 16000 ? { status: 'limit' } : data.status === 'incomplete' ? { status: 'incomplete' } : {}) };
     }
     async function send(message) {
       message = String(message || '').trim().slice(0, 4000);
@@ -775,16 +920,29 @@
         if (destroyed || controller.signal.aborted) return;
         if (progress.mode) delivery.mode = progress.mode;
         if (progress.chunk) delivery.chunks++;
-        if (progress.stage) pendingLabel.textContent = progress.stage === 'processing' ? '模型正在處理，等候文字回覆…'
+        if (progress.sources) web.sources = safeSources(progress.sources);
+        if (progress.citations) web.citations = safeCitations(progress.citations);
+        if (draft && (progress.sources || progress.citations)) {
+          draft.sources = web.sources;
+          draft.citations = web.citations;
+          if (paint === null) paint = requestAnimationFrame(paintDraft);
+        }
+        if (progress.stage === 'searching' || progress.stage === 'search-done') {
+          ref('search-progress').hidden = false;
+          ref('search-progress').textContent = progress.stage === 'searching' ? '正在搜尋網頁…' : '搜尋完成，正在整理回覆…';
+        }
+        if (progress.stage) pendingLabel.textContent = progress.stage === 'searching' ? '正在搜尋網頁…'
+          : progress.stage === 'search-done' ? '搜尋完成，正在整理回覆…' : progress.stage === 'processing' ? '模型正在處理，等候文字回覆…'
           : progress.stage === 'complete' ? '等候服務傳回完整回覆…' : '服務已連接，等候文字回覆…';
       };
+      const web = { sources: [], citations: [] };
       let draft = null, draftRow = null, paint = null, lastSaved = 0;
       const paintDraft = () => {
         paint = null;
         if (!draftRow || destroyed) return;
         const thread = ref('thread');
         const follow = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 100;
-        draftRow.querySelector('.dc-message-text').replaceChildren(markdown(draft.content));
+        draftRow.querySelector('.dc-message-text').replaceChildren(assistantContent(draft));
         if (follow) scroll();
       };
       const onDelta = (text) => {
@@ -793,7 +951,7 @@
         if (delivery.firstTextMs === null) delivery.firstTextMs = Math.max(0, performance.now() - startedAt);
         pending.remove();
         if (!draft) {
-          draft = append('assistant', text.slice(0, 16000));
+          draft = append('assistant', text.slice(0, 16000), [], null, null, web);
           draftRow = ref('messages').lastElementChild;
           draftRow.classList.add('is-streaming');
           lastSaved = Date.now();
@@ -829,13 +987,15 @@
         if (!result || typeof result.reply !== 'string' || !result.reply.trim()) throw new Error('empty_reply');
         pending.remove();
         if (!draft) {
-          draft = append('assistant', result.reply.slice(0, 16000), result.links);
+          draft = append('assistant', result.reply.slice(0, 16000), result.links, null, null, result);
           draftRow = ref('messages').lastElementChild;
         }
         draft.content = result.reply.slice(0, 16000);
         if (delivery.firstTextMs === null) delivery.firstTextMs = Math.max(0, performance.now() - startedAt);
         draft.delivery = deliveryInfo();
         draft.links = safeLinks(result.links);
+        draft.sources = safeSources(result.sources);
+        draft.citations = safeCitations(result.citations, draft.content.length);
         if (['stopped', 'incomplete', 'limit'].includes(result.status)) draft.status = result.status;
         else if (result.reply.length > 16000) draft.status = 'limit';
         finishDraft();
@@ -844,6 +1004,7 @@
         pending.remove();
         const reason = error.kind === 'channel_unavailable' ? 'API 供應商目前沒有此模型的可用渠道。請確認令牌分組及模型名稱，或稍後再試。'
           : error.kind === 'model_unavailable' ? 'API 服務未提供此模型。請在 AI 設定選擇供應商目前可用的模型名稱。'
+          : error.kind === 'search_unavailable' ? '目前模型服務未接受網頁搜尋。可以關閉「網頁搜尋」後再試。'
           : error.status === 401 || error.status === 403 ? '連線未獲授權，請檢查 API key 及模型權限。'
           : error.status === 429 ? '服務暫時達到用量上限，請稍後再試。'
           : [408, 504, 524].includes(error.status) ? '模型服務連線逾時，未能收到完整回覆。請稍後再試。'
@@ -863,6 +1024,7 @@
         controller.signal.removeEventListener('abort', onAbort);
         if (paint !== null) cancelAnimationFrame(paint);
         pending.remove();
+        if (!destroyed) ref('search-progress').hidden = true;
         requestController = null;
         if (!destroyed) { setBusy(false); input.focus(); }
       }
@@ -870,7 +1032,7 @@
     }
     function exportChat() {
       if (!active.messages.length) return;
-      const transcript = ['Chat · ' + active.title, '', ...active.messages.map((m) => '[' + m.at + '] ' + (m.role === 'user' ? '你' : '助手') + '\n' + m.content + (m.image ? '\n[圖片：' + m.image.name + '；文字下載不包含圖片內容]' : '') + (m.links.length ? '\n' + m.links.map((link) => link.label + ': ' + link.href).join('\n') : '') + '\n')].join('\n');
+      const transcript = ['Chat · ' + active.title, '', ...active.messages.map((m) => '[' + m.at + '] ' + (m.role === 'user' ? '你' : '助手') + '\n' + (m.role === 'assistant' ? citedText(m) : m.content) + (safeSources(m.sources).length ? '\n\n搜尋來源：\n' + safeSources(m.sources).map((source) => source.title + ': ' + source.url).join('\n') : '') + (m.image ? '\n[圖片：' + m.image.name + '；文字下載不包含圖片內容]' : '') + (m.links.length ? '\n' + m.links.map((link) => link.label + ': ' + link.href).join('\n') : '') + '\n')].join('\n');
       const url = URL.createObjectURL(new Blob(['\ufeff' + transcript], { type: 'text/plain;charset=utf-8' }));
       const anchor = document.createElement('a');
       anchor.href = url;
@@ -895,6 +1057,11 @@
       if (action === 'remove-image') clearImage();
       if (action === 'stop') requestController?.abort('user');
       if (action === 'forget-key') clearKey();
+      if (action === 'search') {
+        config.webSearch = !config.webSearch;
+        rememberConnection();
+        updateSearchToggle();
+      }
       if (button.dataset.question) send(button.dataset.question);
     });
     listen(ref('save'), 'change', () => setSaving(ref('save').checked));
@@ -952,7 +1119,7 @@
         catch (_) { keySaved = false; }
       }
       // Credentials are separate from conversation records and are bound to this endpoint.
-      const remembered = !storage || write(connectionKey, { endpoint: config.endpoint, model, protocol, stream: config.stream, rememberKey });
+      const remembered = rememberConnection();
       updateMode();
       ref('settings').close();
       if (!keySaved) notice('已套用設定，但未能記住 API key。目前分頁仍可使用，重新整理後需再輸入。');
@@ -1005,6 +1172,7 @@
       config.protocol = connection.protocol;
       if (options.stream === undefined && typeof connection.stream === 'boolean') config.stream = connection.stream;
       if (options.rememberKey === undefined && typeof connection.rememberKey === 'boolean') config.rememberKey = connection.rememberKey;
+      if (options.webSearch === undefined && typeof connection.webSearch === 'boolean') config.webSearch = connection.webSearch;
     }
     const credential = read(credentialKey);
     if (options.apiKey === undefined && !config.apiKey && config.rememberKey && credential?.endpoint === config.endpoint && typeof credential.apiKey === 'string') config.apiKey = credential.apiKey;

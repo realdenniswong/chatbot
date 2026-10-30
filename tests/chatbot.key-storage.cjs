@@ -140,9 +140,9 @@ const path = require('node:path');
     assert.equal(await storedKey(), null);
     // Upgrading the previous default must preserve keys, chat history and connection choices.
     const historyBeforeMigration = await page.evaluate(() => chatbot.getConversation().messages);
-    await context.route('https://tianyuai.lol/v1/chat/completions', async route => {
+    await context.route('https://tianyuai.lol/v1/responses', async route => {
       requests.push({ body: route.request().postDataJSON(), authorization: route.request().headers().authorization });
-      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ choices: [{ message: { content: '模型設定測試成功' } }] }) });
+      await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ output: [{ type: 'message', content: [{ type: 'output_text', text: '模型設定測試成功' }] }] }) });
     });
     await page.evaluate(() => {
       const endpoint = 'https://tianyuai.lol/v1/chat/completions';
@@ -157,6 +157,9 @@ const path = require('node:path');
     assert.equal(requests.at(-1).body.stream, false);
     assert.equal(requests.at(-1).authorization, 'Bearer test-migration-key');
     assert.equal((await storedKey()).apiKey, 'test-migration-key');
+    assert.equal((await storedKey()).endpoint, 'https://tianyuai.lol/v1/responses');
+    assert.deepEqual(requests.at(-1).body.tools, [{ type: 'web_search' }]);
+    assert.equal(requests.at(-1).body.messages, undefined);
     await page.evaluate(() => {
       const key = 'chatbot-app:/ChatBot/:connection';
       const connection = JSON.parse(localStorage.getItem(key));
